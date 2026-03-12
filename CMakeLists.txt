@@ -49,7 +49,9 @@ else()
 			glslang::glslang-default-resource-limits
 			SPIRV-Tools-opt
 		)
-		set(GLSLANG_INCLUDE "")
+		# glslang target provides parent include dir; source expects glslang_c_interface.h directly
+		get_target_property(_GLSLANG_INC glslang::glslang INTERFACE_INCLUDE_DIRECTORIES)
+		find_path(GLSLANG_INCLUDE glslang_c_interface.h PATHS ${_GLSLANG_INC} PATH_SUFFIXES glslang/Include)
 	else()
 		# Legacy layout (e.g. Ubuntu vulkan-sdk package)
 		find_library(LIB_GLSLANG glslang REQUIRED)
