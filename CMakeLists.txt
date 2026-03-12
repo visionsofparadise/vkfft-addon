@@ -4,7 +4,7 @@ project(vkfft_addon)
 
 # Vulkan SDK static libs are built with /MD — match that
 if(MSVC)
-	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
+	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL" CACHE STRING "" FORCE)
 endif()
 
 add_compile_definitions(NAPI_VERSION=7)
