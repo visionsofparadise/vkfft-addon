@@ -58,12 +58,7 @@ jobs:
       - name: Install Vulkan SDK (macOS)
         if: matrix.platform == 'darwin'
         run: |
-          ver="1.4.304.1"
-          curl -fsSL -o vulkansdk.dmg "https://sdk.lunarg.com/sdk/download/$ver/mac/vulkansdk-macos-$ver.dmg"
-          hdiutil attach vulkansdk.dmg -mountpoint /Volumes/VulkanSDK
-          sudo /Volumes/VulkanSDK/InstallVulkan.app/Contents/MacOS/InstallVulkan --root ~/VulkanSDK/$ver --accept-licenses --default-answer --confirm-command install
-          hdiutil detach /Volumes/VulkanSDK
-          echo "VULKAN_SDK=$HOME/VulkanSDK/$ver/macOS" >> $GITHUB_ENV
+          brew install vulkan-headers vulkan-loader glslang spirv-tools molten-vk
 
       - run: npm install
 
