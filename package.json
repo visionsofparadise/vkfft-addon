@@ -1,0 +1,16 @@
+{
+  "name": "vkfft-addon",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "cmake-js compile --CDCMAKE_BUILD_TYPE=Release",
+    "rebuild": "cmake-js rebuild --CDCMAKE_BUILD_TYPE=Release"
+  },
+  "binary": {
+    "napi_versions": [7]
+  },
+  "devDependencies": {
+    "cmake-js": "^8.0.0",
+    "node-addon-api": "^8.6.0"
+  }
+}

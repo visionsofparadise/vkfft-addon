@@ -1,0 +1,85 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win32
+            arch: x64
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+          # macOS requires Metal backend (VKFFT_BACKEND=5) — separate configuration needed
+          # - os: macos-13
+          #   platform: darwin
+          #   arch: x64
+          # - os: macos-latest
+          #   platform: darwin
+          #   arch: arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Vulkan SDK (Windows)
+        if: matrix.platform == 'win32'
+        uses: humbletim/setup-vulkan-sdk@v1.2.0
+        with:
+          vulkan-query-version: latest
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, glslang, SPIRV-Tools
+          vulkan-use-cache: true
+
+      - name: Install Vulkan SDK (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan.list https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
+          sudo apt update
+          sudo apt install -y vulkan-sdk
+
+      - run: npm install
+
+      - name: Build addon
+        run: npx cmake-js compile --CDCMAKE_BUILD_TYPE=Release
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp build/Release/vkfft_addon.node artifacts/vkfft-${{ matrix.platform }}-${{ matrix.arch }}.node
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vkfft-${{ matrix.platform }}-${{ matrix.arch }}
+          path: artifacts/*.node
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: all-prebuilts
+          path: artifacts/*.node
