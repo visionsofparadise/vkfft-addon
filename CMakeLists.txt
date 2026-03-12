@@ -36,11 +36,25 @@ if(MSVC)
 	)
 	set(GLSLANG_INCLUDE ${VULKAN_SDK}/Include/glslang/Include)
 else()
-	find_package(PkgConfig)
-	pkg_check_modules(GLSLANG REQUIRED glslang)
-	pkg_check_modules(SPIRV_TOOLS REQUIRED SPIRV-Tools)
-	set(GLSLANG_LIBS ${GLSLANG_LIBRARIES} ${SPIRV_TOOLS_LIBRARIES})
-	set(GLSLANG_INCLUDE ${GLSLANG_INCLUDE_DIRS})
+	find_library(LIB_GLSLANG glslang)
+	find_library(LIB_MACHINEINDEPENDENT MachineIndependent)
+	find_library(LIB_GENERICCODEGEN GenericCodeGen)
+	find_library(LIB_OSDEPENDENT OSDependent)
+	find_library(LIB_SPIRV SPIRV)
+	find_library(LIB_SPIRV_TOOLS SPIRV-Tools)
+	find_library(LIB_SPIRV_TOOLS_OPT SPIRV-Tools-opt)
+	find_library(LIB_GLSLANG_RESOURCE glslang-default-resource-limits)
+	set(GLSLANG_LIBS
+		${LIB_GLSLANG}
+		${LIB_MACHINEINDEPENDENT}
+		${LIB_GENERICCODEGEN}
+		${LIB_OSDEPENDENT}
+		${LIB_SPIRV}
+		${LIB_SPIRV_TOOLS}
+		${LIB_SPIRV_TOOLS_OPT}
+		${LIB_GLSLANG_RESOURCE}
+	)
+	set(GLSLANG_INCLUDE "")
 endif()
 
 # Build the addon
