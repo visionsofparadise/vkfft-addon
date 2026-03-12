@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.15)
 cmake_policy(SET CMP0091 NEW)
 project(vkfft_addon)
 
+# Vulkan SDK static libs are built with /MD — match that
+if(MSVC)
+	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
+endif()
+
 add_compile_definitions(NAPI_VERSION=7)
 add_compile_definitions(VKFFT_BACKEND=0)
 
