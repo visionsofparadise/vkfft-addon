@@ -36,24 +36,8 @@ if(MSVC)
 	)
 	set(GLSLANG_INCLUDE ${VULKAN_SDK}/Include/glslang/Include)
 else()
-	find_library(LIB_GLSLANG glslang)
-	find_library(LIB_MACHINEINDEPENDENT MachineIndependent)
-	find_library(LIB_GENERICCODEGEN GenericCodeGen)
-	find_library(LIB_OSDEPENDENT OSDependent)
-	find_library(LIB_SPIRV SPIRV)
-	find_library(LIB_SPIRV_TOOLS SPIRV-Tools)
-	find_library(LIB_SPIRV_TOOLS_OPT SPIRV-Tools-opt)
-	find_library(LIB_GLSLANG_RESOURCE glslang-default-resource-limits)
-	set(GLSLANG_LIBS
-		${LIB_GLSLANG}
-		${LIB_MACHINEINDEPENDENT}
-		${LIB_GENERICCODEGEN}
-		${LIB_OSDEPENDENT}
-		${LIB_SPIRV}
-		${LIB_SPIRV_TOOLS}
-		${LIB_SPIRV_TOOLS_OPT}
-		${LIB_GLSLANG_RESOURCE}
-	)
+	# VkFFT's FetchContent already fetches and builds glslang — use those CMake targets
+	set(GLSLANG_LIBS glslang MachineIndependent GenericCodeGen OSDependent SPIRV glslang-default-resource-limits)
 	set(GLSLANG_INCLUDE "")
 endif()
 
