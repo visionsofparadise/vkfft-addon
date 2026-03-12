@@ -7,21 +7,19 @@ add_compile_definitions(VKFFT_BACKEND=0)
 
 include(FetchContent)
 
-# VkFFT — header-only, download from GitHub
+# VkFFT — header-only, just download the source (don't build)
 FetchContent_Declare(
 	vkfft
 	GIT_REPOSITORY https://github.com/DTolm/VkFFT.git
 	GIT_TAG v1.3.4
 	GIT_SHALLOW TRUE
 )
-FetchContent_MakeAvailable(vkfft)
+FetchContent_Populate(vkfft)
 
 # Vulkan SDK
 find_package(Vulkan REQUIRED)
 
-# glslang — required by VkFFT for shader compilation
-# On Windows with VS 2022, link Vulkan SDK static libs directly.
-# On other platforms, find via pkg-config or Vulkan SDK.
+# glslang + SPIRV — required by VkFFT for runtime shader compilation
 if(MSVC)
 	set(VULKAN_SDK "$ENV{VULKAN_SDK}")
 	set(GLSLANG_LIBS
@@ -36,10 +34,27 @@ if(MSVC)
 	)
 	set(GLSLANG_INCLUDE ${VULKAN_SDK}/Include/glslang/Include)
 else()
-	# VkFFT's FetchContent already fetches and builds glslang — use those CMake targets
-	set(GLSLANG_LIBS glslang MachineIndependent GenericCodeGen OSDependent SPIRV glslang-default-resource-limits)
-	# VkFFT fetches glslang into its source tree — add the Include subdir for glslang_c_interface.h
-	set(GLSLANG_INCLUDE ${vkfft_SOURCE_DIR}/glslang-main/glslang/Include)
+	# Use system glslang/SPIRV from vulkan-sdk package
+	find_library(LIB_GLSLANG glslang REQUIRED)
+	find_library(LIB_MACHINEINDEPENDENT MachineIndependent REQUIRED)
+	find_library(LIB_GENERICCODEGEN GenericCodeGen REQUIRED)
+	find_library(LIB_OSDEPENDENT OSDependent REQUIRED)
+	find_library(LIB_SPIRV SPIRV REQUIRED)
+	find_library(LIB_SPIRV_TOOLS SPIRV-Tools REQUIRED)
+	find_library(LIB_SPIRV_TOOLS_OPT SPIRV-Tools-opt REQUIRED)
+	find_library(LIB_GLSLANG_RESOURCE glslang-default-resource-limits REQUIRED)
+	set(GLSLANG_LIBS
+		${LIB_GLSLANG}
+		${LIB_MACHINEINDEPENDENT}
+		${LIB_GENERICCODEGEN}
+		${LIB_OSDEPENDENT}
+		${LIB_SPIRV}
+		${LIB_SPIRV_TOOLS}
+		${LIB_SPIRV_TOOLS_OPT}
+		${LIB_GLSLANG_RESOURCE}
+	)
+	# vulkan-sdk puts glslang headers at /usr/include/glslang/Include/
+	find_path(GLSLANG_INCLUDE glslang_c_interface.h PATH_SUFFIXES glslang/Include)
 endif()
 
 # Build the addon
