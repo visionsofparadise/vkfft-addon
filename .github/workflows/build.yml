@@ -18,13 +18,13 @@ jobs:
           - os: ubuntu-latest
             platform: linux
             arch: x64
-          # macOS requires Metal backend (VKFFT_BACKEND=5) — separate configuration needed
-          # - os: macos-13
-          #   platform: darwin
-          #   arch: x64
-          # - os: macos-latest
-          #   platform: darwin
-          #   arch: arm64
+          - os: macos-latest
+            platform: darwin
+            arch: x64
+            cmake-extra: "--CDCMAKE_OSX_ARCHITECTURES=x86_64"
+          - os: macos-latest
+            platform: darwin
+            arch: arm64
 
     runs-on: ${{ matrix.os }}
 
@@ -55,12 +55,23 @@ jobs:
           sudo apt update
           sudo apt install -y vulkan-sdk
 
+      - name: Install Vulkan SDK (macOS)
+        if: matrix.platform == 'darwin'
+        run: |
+          ver="1.4.304.1"
+          curl -fsSL -o vulkansdk.dmg "https://sdk.lunarg.com/sdk/download/$ver/mac/vulkansdk-macos-$ver.dmg"
+          hdiutil attach vulkansdk.dmg -mountpoint /Volumes/VulkanSDK
+          sudo /Volumes/VulkanSDK/InstallVulkan.app/Contents/MacOS/InstallVulkan --root ~/VulkanSDK/$ver --accept-licenses --default-answer --confirm-command install
+          hdiutil detach /Volumes/VulkanSDK
+          echo "VULKAN_SDK=$HOME/VulkanSDK/$ver/macOS" >> $GITHUB_ENV
+
       - run: npm install
 
       - name: Build addon
-        run: npx cmake-js compile --CDCMAKE_BUILD_TYPE=Release
+        run: npx cmake-js compile --CDCMAKE_BUILD_TYPE=Release ${{ matrix.cmake-extra }}
 
       - name: Test addon
+        if: matrix.cmake-extra == ''
         run: node test.js
 
       - name: Rename artifact
