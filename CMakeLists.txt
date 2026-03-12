@@ -38,7 +38,8 @@ if(MSVC)
 else()
 	# VkFFT's FetchContent already fetches and builds glslang — use those CMake targets
 	set(GLSLANG_LIBS glslang MachineIndependent GenericCodeGen OSDependent SPIRV glslang-default-resource-limits)
-	set(GLSLANG_INCLUDE "")
+	# VkFFT fetches glslang into its source tree — add the Include subdir for glslang_c_interface.h
+	set(GLSLANG_INCLUDE ${vkfft_SOURCE_DIR}/glslang-main/glslang/Include)
 endif()
 
 # Build the addon
