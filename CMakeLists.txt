@@ -39,27 +39,39 @@ if(MSVC)
 	)
 	set(GLSLANG_INCLUDE ${VULKAN_SDK}/Include/glslang/Include)
 else()
-	# Use system glslang/SPIRV from vulkan-sdk package
-	find_library(LIB_GLSLANG glslang REQUIRED)
-	find_library(LIB_MACHINEINDEPENDENT MachineIndependent REQUIRED)
-	find_library(LIB_GENERICCODEGEN GenericCodeGen REQUIRED)
-	find_library(LIB_OSDEPENDENT OSDependent REQUIRED)
-	find_library(LIB_SPIRV SPIRV REQUIRED)
-	find_library(LIB_SPIRV_TOOLS SPIRV-Tools REQUIRED)
-	find_library(LIB_SPIRV_TOOLS_OPT SPIRV-Tools-opt REQUIRED)
-	find_library(LIB_GLSLANG_RESOURCE glslang-default-resource-limits REQUIRED)
-	set(GLSLANG_LIBS
-		${LIB_GLSLANG}
-		${LIB_MACHINEINDEPENDENT}
-		${LIB_GENERICCODEGEN}
-		${LIB_OSDEPENDENT}
-		${LIB_SPIRV}
-		${LIB_SPIRV_TOOLS}
-		${LIB_SPIRV_TOOLS_OPT}
-		${LIB_GLSLANG_RESOURCE}
-	)
-	# vulkan-sdk puts glslang headers at /usr/include/glslang/Include/
-	find_path(GLSLANG_INCLUDE glslang_c_interface.h PATH_SUFFIXES glslang/Include)
+	find_package(glslang CONFIG QUIET)
+	find_package(SPIRV-Tools CONFIG QUIET)
+	if(glslang_FOUND AND SPIRV-Tools_FOUND)
+		# Modern glslang (14+) — use CMake targets
+		set(GLSLANG_LIBS
+			glslang::glslang
+			glslang::SPIRV
+			glslang::glslang-default-resource-limits
+			SPIRV-Tools-opt
+		)
+		set(GLSLANG_INCLUDE "")
+	else()
+		# Legacy layout (e.g. Ubuntu vulkan-sdk package)
+		find_library(LIB_GLSLANG glslang REQUIRED)
+		find_library(LIB_MACHINEINDEPENDENT MachineIndependent REQUIRED)
+		find_library(LIB_GENERICCODEGEN GenericCodeGen REQUIRED)
+		find_library(LIB_OSDEPENDENT OSDependent REQUIRED)
+		find_library(LIB_SPIRV SPIRV REQUIRED)
+		find_library(LIB_SPIRV_TOOLS SPIRV-Tools REQUIRED)
+		find_library(LIB_SPIRV_TOOLS_OPT SPIRV-Tools-opt REQUIRED)
+		find_library(LIB_GLSLANG_RESOURCE glslang-default-resource-limits REQUIRED)
+		set(GLSLANG_LIBS
+			${LIB_GLSLANG}
+			${LIB_MACHINEINDEPENDENT}
+			${LIB_GENERICCODEGEN}
+			${LIB_OSDEPENDENT}
+			${LIB_SPIRV}
+			${LIB_SPIRV_TOOLS}
+			${LIB_SPIRV_TOOLS_OPT}
+			${LIB_GLSLANG_RESOURCE}
+		)
+		find_path(GLSLANG_INCLUDE glslang_c_interface.h PATH_SUFFIXES glslang/Include)
+	endif()
 endif()
 
 # Build the addon
