@@ -78,8 +78,90 @@ if (hasGpu) {
     assert(err < 1e-4, `error ${err}`);
     console.log(`  max error: ${err.toExponential(2)}`);
   });
+
+  // ── 2D tests ────────────────────────────────────────────────────────────
+
+  test("batchFft2D impulse at (0,0) gives flat magnitude spectrum", () => {
+    const rows = 4;
+    const cols = 4;
+    const input = new Float32Array(rows * cols).fill(0);
+    input[0] = 1; // impulse at (0,0)
+    const { re, im } = addon.batchFft2D(input, rows, cols, 1);
+    const complexCols = cols / 2 + 1;
+    assert(re.length === rows * complexCols, `re length ${re.length}, expected ${rows * complexCols}`);
+    assert(im.length === rows * complexCols, `im length ${im.length}`);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < complexCols; c++) {
+        const magSq = re[r * complexCols + c] ** 2 + im[r * complexCols + c] ** 2;
+        assert(Math.abs(magSq - 1) < 1e-4, `magnitude^2 at (${r},${c}) = ${magSq}, expected 1`);
+      }
+    }
+  });
+
+  test("batchFft2D round-trip random 4x4 x 2", () => {
+    const rows = 4;
+    const cols = 4;
+    const batchCount = 2;
+    const input = new Float32Array(rows * cols * batchCount);
+    for (let i = 0; i < input.length; i++) input[i] = Math.random() * 2 - 1;
+    const { re, im } = addon.batchFft2D(input, rows, cols, batchCount);
+    const output = addon.batchIfft2D(re, im, rows, cols, batchCount);
+    const err = maxError(input, output);
+    assert(err < 1e-4, `error ${err}`);
+    console.log(`  max error: ${err.toExponential(2)}`);
+  });
+
+  test("batchFft2D non-square DFTT shape (rows=16, cols=32, batch=100)", () => {
+    // This is the shape engineering-side DFTT will use. Wrong axis order fails here.
+    const rows = 16;
+    const cols = 32;
+    const batchCount = 100;
+    const complexCols = cols / 2 + 1;
+    const input = new Float32Array(rows * cols * batchCount);
+    for (let i = 0; i < input.length; i++) input[i] = Math.random() * 2 - 1;
+    const { re, im } = addon.batchFft2D(input, rows, cols, batchCount);
+    // Verify shape: rows × complexCols per block (R2C reduces innermost cols)
+    assert(re.length === rows * complexCols * batchCount,
+      `re length ${re.length}, expected ${rows * complexCols * batchCount}`);
+    assert(im.length === rows * complexCols * batchCount, `im length ${im.length}`);
+    const output = addon.batchIfft2D(re, im, rows, cols, batchCount);
+    assert(output.length === rows * cols * batchCount,
+      `output length ${output.length}, expected ${rows * cols * batchCount}`);
+    const err = maxError(input, output);
+    assert(err < 1e-3, `error ${err}`); // fp32 VkFFT over 100 batches may loosen slightly
+    console.log(`  max error: ${err.toExponential(2)}`);
+  });
+
+  test("batchFft2D DC-constant blocks across multiple shapes", () => {
+    const shapes = [
+      { rows: 8, cols: 8 },
+      { rows: 16, cols: 32 },
+      { rows: 32, cols: 16 },
+      { rows: 4, cols: 8 },
+    ];
+    const batchCount = 3;
+    for (const { rows, cols } of shapes) {
+      const complexCols = cols / 2 + 1;
+      const v = 0.5;
+      const input = new Float32Array(rows * cols * batchCount).fill(v);
+      const { re, im } = addon.batchFft2D(input, rows, cols, batchCount);
+      // DC bin at (0,0) of each block = v * rows * cols (unnormalized forward DFT)
+      const expectedDc = v * rows * cols;
+      for (let b = 0; b < batchCount; b++) {
+        const dcRe = re[b * rows * complexCols + 0];
+        const dcIm = im[b * rows * complexCols + 0];
+        assert(Math.abs(dcRe - expectedDc) < 1e-2,
+          `shape ${rows}x${cols} batch ${b} DC re=${dcRe}, expected ${expectedDc}`);
+        assert(Math.abs(dcIm) < 1e-2,
+          `shape ${rows}x${cols} batch ${b} DC im=${dcIm}, expected 0`);
+      }
+      const output = addon.batchIfft2D(re, im, rows, cols, batchCount);
+      const err = maxError(input, output);
+      assert(err < 1e-3, `shape ${rows}x${cols} round-trip error ${err}`);
+    }
+  });
 } else {
-  console.log("No GPU detected — skipping FFT tests (CI expected)");
+  console.log("No Vulkan device — skipping all GPU tests (CI expected)");
 }
 
 process.exit(failed);

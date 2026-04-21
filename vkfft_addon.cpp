@@ -29,10 +29,19 @@ static bool gpu_available = false;
 static std::mutex gpu_mutex;
 
 // ── Cached VkFFT plans ──────────────────────────────────────────────────────
+// Cache key scheme (for when caching is wired up — currently plans are built
+// and destroyed per call, matching the existing 1D code path):
+//   1D: (fftDim=1, rows=1, cols=fftSize, batchCount)
+//   2D: (fftDim=2, rows,   cols,         batchCount)
+// shape_key = (uint64_t)fftDim << 56 | (uint64_t)(uint16_t)rows << 40
+//           | (uint64_t)(uint16_t)cols << 24 | (uint64_t)(uint32_t)batchCount
+// This keeps 1D and 2D plans in disjoint key ranges.
 struct CachedPlan {
 	VkFFTApplication app;
 	uint64_t bufferSize;
-	int fftSize;
+	int fftDim;       // 1 or 2
+	int rows;         // 1 for 1D
+	int cols;         // fftSize for 1D
 	int batchCount;
 };
 
@@ -455,6 +464,284 @@ Napi::Value BatchFft(const Napi::CallbackInfo& info) {
 	return result;
 }
 
+// ── batchFft2D(input: Float32Array, rows: number, cols: number, batchCount: number) ─
+// => { re: Float32Array, im: Float32Array }
+// Layout (matches fftw-addon):
+//   input[b * rows * cols + r * cols + c]   — block-major, row-major within each block
+//   output re/im[b * rows * (cols/2+1) + r * (cols/2+1) + c]  — R2C reduction on innermost (cols) axis
+// VkFFT: size[0] is the fastest-varying axis, so we set size[0]=cols, size[1]=rows to match
+// the FFTW "rows × (cols/2+1)" output layout. performR2C=1 reduces size[0] (cols).
+
+Napi::Value BatchFft2D(const Napi::CallbackInfo& info) {
+	Napi::Env env = info.Env();
+
+	if (info.Length() < 4) {
+		Napi::TypeError::New(env, "Expected 4 arguments: input, rows, cols, batchCount").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	if (!initGPU()) {
+		Napi::Error::New(env, "Vulkan GPU not available").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	Napi::Float32Array input = info[0].As<Napi::Float32Array>();
+	int rows = info[1].As<Napi::Number>().Int32Value();
+	int cols = info[2].As<Napi::Number>().Int32Value();
+	int batch_count = info[3].As<Napi::Number>().Int32Value();
+	int complex_cols = cols / 2 + 1;
+
+	if (rows <= 0 || cols <= 0 || batch_count <= 0) {
+		Napi::RangeError::New(env, "rows, cols, batchCount must be positive").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	if ((int)input.ElementLength() < rows * cols * batch_count) {
+		Napi::RangeError::New(env, "Input buffer too small for rows * cols * batchCount").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	// R2C 2D: per-batch GPU buffer is rows * 2 * complex_cols floats (padded complex output)
+	uint64_t bufferSizePerBatch = (uint64_t)sizeof(float) * 2 * complex_cols * rows;
+	uint64_t totalBufferSize = bufferSizePerBatch * batch_count;
+
+	VkBuffer gpuBuffer = VK_NULL_HANDLE;
+	VkDeviceMemory gpuMemory = VK_NULL_HANDLE;
+	VkFFTResult resFFT = allocateBuffer(&gpuBuffer, &gpuMemory,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_HEAP_DEVICE_LOCAL_BIT, totalBufferSize);
+	if (resFFT != VKFFT_SUCCESS) {
+		Napi::Error::New(env, "Failed to allocate GPU buffer").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	// Pack input: each row of each batch block is rows * cols reals, padded to rows * 2*complex_cols
+	// In VkFFT R2C layout, the padding goes at the end of each innermost row (size[0] axis).
+	float* padded_input = (float*)calloc(totalBufferSize, 1);
+	float* input_data = input.Data();
+	for (int b = 0; b < batch_count; b++) {
+		for (int r = 0; r < rows; r++) {
+			float* src = input_data + b * rows * cols + r * cols;
+			float* dst = padded_input + b * 2 * complex_cols * rows + r * 2 * complex_cols;
+			memcpy(dst, src, cols * sizeof(float));
+		}
+	}
+
+	resFFT = transferDataFromCPU(padded_input, &gpuBuffer, totalBufferSize);
+	free(padded_input);
+	if (resFFT != VKFFT_SUCCESS) {
+		vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+		vkFreeMemory(gpu.device, gpuMemory, nullptr);
+		Napi::Error::New(env, "Failed to transfer data to GPU").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	VkFFTConfiguration configuration = {};
+	VkFFTApplication app = {};
+
+	configuration.FFTdim = 2;
+	configuration.size[0] = cols;   // fastest-varying, R2C reduction axis
+	configuration.size[1] = rows;
+	configuration.numberBatches = batch_count;
+	configuration.performR2C = 1;
+	configuration.device = &gpu.device;
+	configuration.queue = &gpu.queue;
+	configuration.fence = &gpu.fence;
+	configuration.commandPool = &gpu.commandPool;
+	configuration.physicalDevice = &gpu.physicalDevice;
+	configuration.isCompilerInitialized = 0;
+	configuration.buffer = &gpuBuffer;
+	configuration.bufferSize = &totalBufferSize;
+
+	resFFT = initializeVkFFT(&app, configuration);
+	if (resFFT != VKFFT_SUCCESS) {
+		vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+		vkFreeMemory(gpu.device, gpuMemory, nullptr);
+		Napi::Error::New(env, std::string("Failed to initialize VkFFT 2D: ") + std::to_string(resFFT)).ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	resFFT = executeVkFFT(&app, 0);
+	if (resFFT != VKFFT_SUCCESS) {
+		deleteVkFFT(&app);
+		vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+		vkFreeMemory(gpu.device, gpuMemory, nullptr);
+		Napi::Error::New(env, "Failed to execute 2D FFT").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	float* output_data = (float*)malloc(totalBufferSize);
+	resFFT = transferDataToCPU(output_data, &gpuBuffer, totalBufferSize);
+
+	deleteVkFFT(&app);
+	vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+	vkFreeMemory(gpu.device, gpuMemory, nullptr);
+
+	if (resFFT != VKFFT_SUCCESS) {
+		free(output_data);
+		Napi::Error::New(env, "Failed to transfer data from GPU").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	// Deinterleave: output layout per batch is rows * complex_cols complex bins (padded stride = 2*complex_cols per row)
+	Napi::Float32Array re = Napi::Float32Array::New(env, rows * complex_cols * batch_count);
+	Napi::Float32Array im = Napi::Float32Array::New(env, rows * complex_cols * batch_count);
+
+	for (int b = 0; b < batch_count; b++) {
+		for (int r = 0; r < rows; r++) {
+			float* batch_out = output_data + b * 2 * complex_cols * rows + r * 2 * complex_cols;
+			int dst_row_off = b * rows * complex_cols + r * complex_cols;
+			for (int i = 0; i < complex_cols; i++) {
+				re[dst_row_off + i] = batch_out[2 * i];
+				im[dst_row_off + i] = batch_out[2 * i + 1];
+			}
+		}
+	}
+
+	free(output_data);
+
+	Napi::Object result = Napi::Object::New(env);
+	result.Set("re", re);
+	result.Set("im", im);
+	return result;
+}
+
+// ── batchIfft2D(re, im, rows, cols, batchCount) => Float32Array ────────────
+// Inverse of batchFft2D. Scaled by 1/(rows*cols) so forward→inverse is identity.
+
+Napi::Value BatchIfft2D(const Napi::CallbackInfo& info) {
+	Napi::Env env = info.Env();
+
+	if (info.Length() < 5) {
+		Napi::TypeError::New(env, "Expected 5 arguments: re, im, rows, cols, batchCount").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	if (!initGPU()) {
+		Napi::Error::New(env, "Vulkan GPU not available").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	Napi::Float32Array re = info[0].As<Napi::Float32Array>();
+	Napi::Float32Array im = info[1].As<Napi::Float32Array>();
+	int rows = info[2].As<Napi::Number>().Int32Value();
+	int cols = info[3].As<Napi::Number>().Int32Value();
+	int batch_count = info[4].As<Napi::Number>().Int32Value();
+	int complex_cols = cols / 2 + 1;
+
+	if (rows <= 0 || cols <= 0 || batch_count <= 0) {
+		Napi::RangeError::New(env, "rows, cols, batchCount must be positive").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	int expected_complex_len = rows * complex_cols * batch_count;
+	if ((int)re.ElementLength() < expected_complex_len || (int)im.ElementLength() < expected_complex_len) {
+		Napi::RangeError::New(env, "re/im buffer too small for rows * (cols/2+1) * batchCount").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	uint64_t bufferSizePerBatch = (uint64_t)sizeof(float) * 2 * complex_cols * rows;
+	uint64_t totalBufferSize = bufferSizePerBatch * batch_count;
+
+	// Interleave re/im into padded per-row complex layout (stride = 2*complex_cols per row)
+	float* interleaved = (float*)malloc(totalBufferSize);
+	for (int b = 0; b < batch_count; b++) {
+		for (int r = 0; r < rows; r++) {
+			float* batch_buf = interleaved + b * 2 * complex_cols * rows + r * 2 * complex_cols;
+			int src_row_off = b * rows * complex_cols + r * complex_cols;
+			for (int i = 0; i < complex_cols; i++) {
+				batch_buf[2 * i] = re[src_row_off + i];
+				batch_buf[2 * i + 1] = im[src_row_off + i];
+			}
+		}
+	}
+
+	VkBuffer gpuBuffer = VK_NULL_HANDLE;
+	VkDeviceMemory gpuMemory = VK_NULL_HANDLE;
+	VkFFTResult resFFT = allocateBuffer(&gpuBuffer, &gpuMemory,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_HEAP_DEVICE_LOCAL_BIT, totalBufferSize);
+	if (resFFT != VKFFT_SUCCESS) {
+		free(interleaved);
+		Napi::Error::New(env, "Failed to allocate GPU buffer").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	resFFT = transferDataFromCPU(interleaved, &gpuBuffer, totalBufferSize);
+	free(interleaved);
+	if (resFFT != VKFFT_SUCCESS) {
+		vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+		vkFreeMemory(gpu.device, gpuMemory, nullptr);
+		Napi::Error::New(env, "Failed to transfer data to GPU").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	VkFFTConfiguration configuration = {};
+	VkFFTApplication app = {};
+
+	configuration.FFTdim = 2;
+	configuration.size[0] = cols;
+	configuration.size[1] = rows;
+	configuration.numberBatches = batch_count;
+	configuration.performR2C = 1;
+	configuration.device = &gpu.device;
+	configuration.queue = &gpu.queue;
+	configuration.fence = &gpu.fence;
+	configuration.commandPool = &gpu.commandPool;
+	configuration.physicalDevice = &gpu.physicalDevice;
+	configuration.isCompilerInitialized = 0;
+	configuration.buffer = &gpuBuffer;
+	configuration.bufferSize = &totalBufferSize;
+
+	resFFT = initializeVkFFT(&app, configuration);
+	if (resFFT != VKFFT_SUCCESS) {
+		vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+		vkFreeMemory(gpu.device, gpuMemory, nullptr);
+		Napi::Error::New(env, std::string("Failed to initialize VkFFT 2D inverse: ") + std::to_string(resFFT)).ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	resFFT = executeVkFFT(&app, 1);
+	if (resFFT != VKFFT_SUCCESS) {
+		deleteVkFFT(&app);
+		vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+		vkFreeMemory(gpu.device, gpuMemory, nullptr);
+		Napi::Error::New(env, "Failed to execute 2D iFFT").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	float* output_data = (float*)malloc(totalBufferSize);
+	resFFT = transferDataToCPU(output_data, &gpuBuffer, totalBufferSize);
+
+	deleteVkFFT(&app);
+	vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+	vkFreeMemory(gpu.device, gpuMemory, nullptr);
+
+	if (resFFT != VKFFT_SUCCESS) {
+		free(output_data);
+		Napi::Error::New(env, "Failed to transfer data from GPU").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	// Extract real values, strip per-row padding, scale by 1/(rows*cols)
+	Napi::Float32Array output = Napi::Float32Array::New(env, rows * cols * batch_count);
+	float scale = 1.0f / (float)(rows * cols);
+
+	for (int b = 0; b < batch_count; b++) {
+		for (int r = 0; r < rows; r++) {
+			float* batch_buf = output_data + b * 2 * complex_cols * rows + r * 2 * complex_cols;
+			int dst_row_off = b * rows * cols + r * cols;
+			for (int i = 0; i < cols; i++) {
+				output[dst_row_off + i] = batch_buf[i] * scale;
+			}
+		}
+	}
+
+	free(output_data);
+
+	return output;
+}
+
 // ── batchIfft(re: Float32Array, im: Float32Array, fftSize: number, batchCount: number) ──
 // => Float32Array
 
@@ -583,6 +870,8 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
 	exports.Set("detectDevice", Napi::Function::New(env, DetectDevice));
 	exports.Set("batchFft", Napi::Function::New(env, BatchFft));
 	exports.Set("batchIfft", Napi::Function::New(env, BatchIfft));
+	exports.Set("batchFft2D", Napi::Function::New(env, BatchFft2D));
+	exports.Set("batchIfft2D", Napi::Function::New(env, BatchIfft2D));
 	return exports;
 }
 
