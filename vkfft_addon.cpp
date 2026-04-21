@@ -464,6 +464,265 @@ Napi::Value BatchFft(const Napi::CallbackInfo& info) {
 	return result;
 }
 
+// ── batchFftInto(input, outRe, outIm, fftSize, batchCount) => undefined ────
+// Identical to batchFft but writes into caller-owned outRe/outIm Float32Arrays.
+// No allocation of output buffers; throws RangeError if outputs are too small.
+
+Napi::Value BatchFftInto(const Napi::CallbackInfo& info) {
+	Napi::Env env = info.Env();
+
+	if (info.Length() < 5) {
+		Napi::TypeError::New(env, "Expected 5 arguments: input, outRe, outIm, fftSize, batchCount").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	if (!initGPU()) {
+		Napi::Error::New(env, "Vulkan GPU not available").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	Napi::Float32Array input = info[0].As<Napi::Float32Array>();
+	Napi::Float32Array outRe = info[1].As<Napi::Float32Array>();
+	Napi::Float32Array outIm = info[2].As<Napi::Float32Array>();
+	int fft_size = info[3].As<Napi::Number>().Int32Value();
+	int batch_count = info[4].As<Napi::Number>().Int32Value();
+	int complex_size = fft_size / 2 + 1;
+
+	if ((int)input.ElementLength() < fft_size * batch_count) {
+		Napi::RangeError::New(env, "Input buffer too small for fftSize * batchCount").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	int expected_complex_len = complex_size * batch_count;
+	if ((int)outRe.ElementLength() < expected_complex_len || (int)outIm.ElementLength() < expected_complex_len) {
+		Napi::RangeError::New(env, "outRe/outIm buffer too small for (fftSize/2+1) * batchCount").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	// R2C buffer: each batch needs 2*(fftSize/2+1) floats (padded complex output)
+	uint64_t bufferSizePerBatch = (uint64_t)sizeof(float) * 2 * complex_size;
+	uint64_t totalBufferSize = bufferSizePerBatch * batch_count;
+
+	// Allocate GPU buffer
+	VkBuffer gpuBuffer = VK_NULL_HANDLE;
+	VkDeviceMemory gpuMemory = VK_NULL_HANDLE;
+	VkFFTResult resFFT = allocateBuffer(&gpuBuffer, &gpuMemory,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_HEAP_DEVICE_LOCAL_BIT, totalBufferSize);
+	if (resFFT != VKFFT_SUCCESS) {
+		Napi::Error::New(env, "Failed to allocate GPU buffer").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	// Prepare input: pack real data into padded layout
+	float* padded_input = (float*)calloc(totalBufferSize, 1);
+	float* input_data = input.Data();
+	for (int b = 0; b < batch_count; b++) {
+		memcpy(padded_input + b * 2 * complex_size, input_data + b * fft_size, fft_size * sizeof(float));
+	}
+
+	resFFT = transferDataFromCPU(padded_input, &gpuBuffer, totalBufferSize);
+	free(padded_input);
+	if (resFFT != VKFFT_SUCCESS) {
+		vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+		vkFreeMemory(gpu.device, gpuMemory, nullptr);
+		Napi::Error::New(env, "Failed to transfer data to GPU").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	VkFFTConfiguration configuration = {};
+	VkFFTApplication app = {};
+
+	configuration.FFTdim = 1;
+	configuration.size[0] = fft_size;
+	configuration.numberBatches = batch_count;
+	configuration.performR2C = 1;
+	configuration.device = &gpu.device;
+	configuration.queue = &gpu.queue;
+	configuration.fence = &gpu.fence;
+	configuration.commandPool = &gpu.commandPool;
+	configuration.physicalDevice = &gpu.physicalDevice;
+	configuration.isCompilerInitialized = 0;
+	configuration.buffer = &gpuBuffer;
+	configuration.bufferSize = &totalBufferSize;
+
+	resFFT = initializeVkFFT(&app, configuration);
+	if (resFFT != VKFFT_SUCCESS) {
+		vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+		vkFreeMemory(gpu.device, gpuMemory, nullptr);
+		Napi::Error::New(env, std::string("Failed to initialize VkFFT: ") + std::to_string(resFFT)).ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	resFFT = executeVkFFT(&app, 0);
+	if (resFFT != VKFFT_SUCCESS) {
+		deleteVkFFT(&app);
+		vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+		vkFreeMemory(gpu.device, gpuMemory, nullptr);
+		Napi::Error::New(env, "Failed to execute FFT").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	float* output_data = (float*)malloc(totalBufferSize);
+	resFFT = transferDataToCPU(output_data, &gpuBuffer, totalBufferSize);
+
+	deleteVkFFT(&app);
+	vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+	vkFreeMemory(gpu.device, gpuMemory, nullptr);
+
+	if (resFFT != VKFFT_SUCCESS) {
+		free(output_data);
+		Napi::Error::New(env, "Failed to transfer data from GPU").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	// Deinterleave complex output directly into caller-owned re/im buffers
+	float* re_data = outRe.Data();
+	float* im_data = outIm.Data();
+	for (int b = 0; b < batch_count; b++) {
+		float* batch_out = output_data + b * 2 * complex_size;
+		for (int i = 0; i < complex_size; i++) {
+			re_data[b * complex_size + i] = batch_out[2 * i];
+			im_data[b * complex_size + i] = batch_out[2 * i + 1];
+		}
+	}
+
+	free(output_data);
+
+	return env.Undefined();
+}
+
+// ── batchIfftInto(re, im, outTime, fftSize, batchCount) => undefined ───────
+// Identical to batchIfft but writes into caller-owned outTime Float32Array.
+
+Napi::Value BatchIfftInto(const Napi::CallbackInfo& info) {
+	Napi::Env env = info.Env();
+
+	if (info.Length() < 5) {
+		Napi::TypeError::New(env, "Expected 5 arguments: re, im, outTime, fftSize, batchCount").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	if (!initGPU()) {
+		Napi::Error::New(env, "Vulkan GPU not available").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	Napi::Float32Array re = info[0].As<Napi::Float32Array>();
+	Napi::Float32Array im = info[1].As<Napi::Float32Array>();
+	Napi::Float32Array outTime = info[2].As<Napi::Float32Array>();
+	int fft_size = info[3].As<Napi::Number>().Int32Value();
+	int batch_count = info[4].As<Napi::Number>().Int32Value();
+	int complex_size = fft_size / 2 + 1;
+
+	int expected_complex_len = complex_size * batch_count;
+	if ((int)re.ElementLength() < expected_complex_len || (int)im.ElementLength() < expected_complex_len) {
+		Napi::RangeError::New(env, "re/im buffer too small for (fftSize/2+1) * batchCount").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	if ((int)outTime.ElementLength() < fft_size * batch_count) {
+		Napi::RangeError::New(env, "outTime buffer too small for fftSize * batchCount").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	uint64_t bufferSizePerBatch = (uint64_t)sizeof(float) * 2 * complex_size;
+	uint64_t totalBufferSize = bufferSizePerBatch * batch_count;
+
+	// Interleave re/im into complex buffer
+	float* interleaved = (float*)malloc(totalBufferSize);
+	float* re_data = re.Data();
+	float* im_data = im.Data();
+	for (int b = 0; b < batch_count; b++) {
+		float* batch_buf = interleaved + b * 2 * complex_size;
+		for (int i = 0; i < complex_size; i++) {
+			batch_buf[2 * i] = re_data[b * complex_size + i];
+			batch_buf[2 * i + 1] = im_data[b * complex_size + i];
+		}
+	}
+
+	VkBuffer gpuBuffer = VK_NULL_HANDLE;
+	VkDeviceMemory gpuMemory = VK_NULL_HANDLE;
+	VkFFTResult resFFT = allocateBuffer(&gpuBuffer, &gpuMemory,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_HEAP_DEVICE_LOCAL_BIT, totalBufferSize);
+	if (resFFT != VKFFT_SUCCESS) {
+		free(interleaved);
+		Napi::Error::New(env, "Failed to allocate GPU buffer").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	resFFT = transferDataFromCPU(interleaved, &gpuBuffer, totalBufferSize);
+	free(interleaved);
+	if (resFFT != VKFFT_SUCCESS) {
+		vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+		vkFreeMemory(gpu.device, gpuMemory, nullptr);
+		Napi::Error::New(env, "Failed to transfer data to GPU").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	VkFFTConfiguration configuration = {};
+	VkFFTApplication app = {};
+
+	configuration.FFTdim = 1;
+	configuration.size[0] = fft_size;
+	configuration.numberBatches = batch_count;
+	configuration.performR2C = 1;
+	configuration.device = &gpu.device;
+	configuration.queue = &gpu.queue;
+	configuration.fence = &gpu.fence;
+	configuration.commandPool = &gpu.commandPool;
+	configuration.physicalDevice = &gpu.physicalDevice;
+	configuration.isCompilerInitialized = 0;
+	configuration.buffer = &gpuBuffer;
+	configuration.bufferSize = &totalBufferSize;
+
+	resFFT = initializeVkFFT(&app, configuration);
+	if (resFFT != VKFFT_SUCCESS) {
+		vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+		vkFreeMemory(gpu.device, gpuMemory, nullptr);
+		Napi::Error::New(env, std::string("Failed to initialize VkFFT: ") + std::to_string(resFFT)).ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	resFFT = executeVkFFT(&app, 1);
+	if (resFFT != VKFFT_SUCCESS) {
+		deleteVkFFT(&app);
+		vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+		vkFreeMemory(gpu.device, gpuMemory, nullptr);
+		Napi::Error::New(env, "Failed to execute iFFT").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	float* output_data = (float*)malloc(totalBufferSize);
+	resFFT = transferDataToCPU(output_data, &gpuBuffer, totalBufferSize);
+
+	deleteVkFFT(&app);
+	vkDestroyBuffer(gpu.device, gpuBuffer, nullptr);
+	vkFreeMemory(gpu.device, gpuMemory, nullptr);
+
+	if (resFFT != VKFFT_SUCCESS) {
+		free(output_data);
+		Napi::Error::New(env, "Failed to transfer data from GPU").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	// Extract real values from padded layout, normalize by 1/fftSize, write into caller buffer
+	float* out_data = outTime.Data();
+	float scale = 1.0f / fft_size;
+
+	for (int b = 0; b < batch_count; b++) {
+		float* batch_buf = output_data + b * 2 * complex_size;
+		for (int i = 0; i < fft_size; i++) {
+			out_data[b * fft_size + i] = batch_buf[i] * scale;
+		}
+	}
+
+	free(output_data);
+
+	return env.Undefined();
+}
+
 // ── batchFft2D(input: Float32Array, rows: number, cols: number, batchCount: number) ─
 // => { re: Float32Array, im: Float32Array }
 // Layout (matches fftw-addon):
@@ -870,6 +1129,8 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
 	exports.Set("detectDevice", Napi::Function::New(env, DetectDevice));
 	exports.Set("batchFft", Napi::Function::New(env, BatchFft));
 	exports.Set("batchIfft", Napi::Function::New(env, BatchIfft));
+	exports.Set("batchFftInto", Napi::Function::New(env, BatchFftInto));
+	exports.Set("batchIfftInto", Napi::Function::New(env, BatchIfftInto));
 	exports.Set("batchFft2D", Napi::Function::New(env, BatchFft2D));
 	exports.Set("batchIfft2D", Napi::Function::New(env, BatchIfft2D));
 	return exports;
