@@ -23,6 +23,25 @@ function assert(cond, msg) {
 	if (!cond) throw new Error(msg);
 }
 
+function createRandomSignal(length) {
+	const signal = new Float32Array(length);
+	for (let i = 0; i < length; i++) signal[i] = Math.random() * 2 - 1;
+	return signal;
+}
+
+function assertRoundTrip(input, output, tolerance) {
+	const error = maxError(input, output);
+	assert(error < tolerance, `error ${error}`);
+	console.log(`  max error: ${error.toExponential(2)}`);
+}
+
+function assertBatchRoundTrip(fftSize, batchCount, tolerance) {
+	const input = createRandomSignal(fftSize * batchCount);
+	const { re, im } = addon.batchFft(input, fftSize, batchCount);
+	const output = addon.batchIfft(re, im, fftSize, batchCount);
+	assertRoundTrip(input, output, tolerance);
+}
+
 // detectDevice — CI runners have no GPU, so null is expected
 test("detectDevice returns string or null", () => {
 	const device = addon.detectDevice();
@@ -44,17 +63,7 @@ if (hasGpu) {
 		assert(Math.abs(im[0]) < 1e-4, `DC bin im=${im[0]}`);
 	});
 
-	test("round-trip fft -> ifft", () => {
-		const fftSize = 1024;
-		const batchCount = 4;
-		const input = new Float32Array(fftSize * batchCount);
-		for (let i = 0; i < input.length; i++) input[i] = Math.random() * 2 - 1;
-		const { re, im } = addon.batchFft(input, fftSize, batchCount);
-		const output = addon.batchIfft(re, im, fftSize, batchCount);
-		const err = maxError(input, output);
-		assert(err < 1e-4, `error ${err}`);
-		console.log(`  max error: ${err.toExponential(2)}`);
-	});
+	test("round-trip fft -> ifft", () => assertBatchRoundTrip(1024, 4, 1e-4));
 
 	test("multiple FFT sizes", () => {
 		for (const fftSize of [256, 512, 2048, 4096]) {
@@ -62,22 +71,12 @@ if (hasGpu) {
 			for (let i = 0; i < fftSize; i++) input[i] = Math.sin((2 * Math.PI * i) / fftSize);
 			const { re, im } = addon.batchFft(input, fftSize, 1);
 			const output = addon.batchIfft(re, im, fftSize, 1);
-			const err = maxError(input, output);
-			assert(err < 1e-4, `fftSize=${fftSize} error=${err}`);
+			const error = maxError(input, output);
+			assert(error < 1e-4, `fftSize=${fftSize} error=${error}`);
 		}
 	});
 
-	test("large batch", () => {
-		const fftSize = 1024;
-		const batchCount = 100;
-		const input = new Float32Array(fftSize * batchCount);
-		for (let i = 0; i < input.length; i++) input[i] = Math.random() * 2 - 1;
-		const { re, im } = addon.batchFft(input, fftSize, batchCount);
-		const output = addon.batchIfft(re, im, fftSize, batchCount);
-		const err = maxError(input, output);
-		assert(err < 1e-4, `error ${err}`);
-		console.log(`  max error: ${err.toExponential(2)}`);
-	});
+	test("large batch", () => assertBatchRoundTrip(1024, 100, 1e-4));
 
 	// ── *Into variants (caller-owned output buffers) ─────────────────────────
 
@@ -85,8 +84,7 @@ if (hasGpu) {
 		const fftSize = 1024;
 		const batchCount = 4;
 		const complexSize = fftSize / 2 + 1;
-		const input = new Float32Array(fftSize * batchCount);
-		for (let i = 0; i < input.length; i++) input[i] = Math.random() * 2 - 1;
+		const input = createRandomSignal(fftSize * batchCount);
 
 		const re = new Float32Array(complexSize * batchCount);
 		const im = new Float32Array(complexSize * batchCount);
@@ -97,42 +95,38 @@ if (hasGpu) {
 		const ret2 = addon.batchIfftInto(re, im, output, fftSize, batchCount);
 		assert(ret2 === undefined, `batchIfftInto return=${ret2}, expected undefined`);
 
-		const err = maxError(input, output);
-		assert(err < 1e-5, `error ${err}`);
-		console.log(`  max error: ${err.toExponential(2)}`);
+		assertRoundTrip(input, output, 1e-5);
 	});
 
 	test("batchFftInto matches batchFft output", () => {
 		const fftSize = 512;
 		const batchCount = 3;
 		const complexSize = fftSize / 2 + 1;
-		const input = new Float32Array(fftSize * batchCount);
-		for (let i = 0; i < input.length; i++) input[i] = Math.random() * 2 - 1;
+		const input = createRandomSignal(fftSize * batchCount);
 
 		const { re: reRef, im: imRef } = addon.batchFft(input, fftSize, batchCount);
 		const re = new Float32Array(complexSize * batchCount);
 		const im = new Float32Array(complexSize * batchCount);
 		addon.batchFftInto(input, re, im, fftSize, batchCount);
 
-		const errRe = maxError(reRef, re);
-		const errIm = maxError(imRef, im);
-		assert(errRe < 1e-5, `re error ${errRe}`);
-		assert(errIm < 1e-5, `im error ${errIm}`);
+		const errorRe = maxError(reRef, re);
+		const errorIm = maxError(imRef, im);
+		assert(errorRe < 1e-5, `re error ${errorRe}`);
+		assert(errorIm < 1e-5, `im error ${errorIm}`);
 	});
 
 	test("batchIfftInto matches batchIfft output", () => {
 		const fftSize = 512;
 		const batchCount = 3;
-		const input = new Float32Array(fftSize * batchCount);
-		for (let i = 0; i < input.length; i++) input[i] = Math.random() * 2 - 1;
+		const input = createRandomSignal(fftSize * batchCount);
 		const { re, im } = addon.batchFft(input, fftSize, batchCount);
 
 		const outRef = addon.batchIfft(re, im, fftSize, batchCount);
 		const output = new Float32Array(fftSize * batchCount);
 		addon.batchIfftInto(re, im, output, fftSize, batchCount);
 
-		const err = maxError(outRef, output);
-		assert(err < 1e-5, `error ${err}`);
+		const error = maxError(outRef, output);
+		assert(error < 1e-5, `error ${error}`);
 	});
 
 	test("batchFftInto throws RangeError on too-small output", () => {
@@ -192,13 +186,10 @@ if (hasGpu) {
 		const rows = 4;
 		const cols = 4;
 		const batchCount = 2;
-		const input = new Float32Array(rows * cols * batchCount);
-		for (let i = 0; i < input.length; i++) input[i] = Math.random() * 2 - 1;
+		const input = createRandomSignal(rows * cols * batchCount);
 		const { re, im } = addon.batchFft2D(input, rows, cols, batchCount);
 		const output = addon.batchIfft2D(re, im, rows, cols, batchCount);
-		const err = maxError(input, output);
-		assert(err < 1e-4, `error ${err}`);
-		console.log(`  max error: ${err.toExponential(2)}`);
+		assertRoundTrip(input, output, 1e-4);
 	});
 
 	test("batchFft2D non-square DFTT shape (rows=16, cols=32, batch=100)", () => {
@@ -207,8 +198,7 @@ if (hasGpu) {
 		const cols = 32;
 		const batchCount = 100;
 		const complexCols = cols / 2 + 1;
-		const input = new Float32Array(rows * cols * batchCount);
-		for (let i = 0; i < input.length; i++) input[i] = Math.random() * 2 - 1;
+		const input = createRandomSignal(rows * cols * batchCount);
 		const { re, im } = addon.batchFft2D(input, rows, cols, batchCount);
 		// Verify shape: rows × complexCols per block (R2C reduces innermost cols)
 		assert(
@@ -221,9 +211,7 @@ if (hasGpu) {
 			output.length === rows * cols * batchCount,
 			`output length ${output.length}, expected ${rows * cols * batchCount}`,
 		);
-		const err = maxError(input, output);
-		assert(err < 1e-3, `error ${err}`); // fp32 VkFFT over 100 batches may loosen slightly
-		console.log(`  max error: ${err.toExponential(2)}`);
+		assertRoundTrip(input, output, 1e-3); // fp32 VkFFT over 100 batches may loosen slightly
 	});
 
 	test("batchFft2D DC-constant blocks across multiple shapes", () => {
@@ -251,8 +239,8 @@ if (hasGpu) {
 				assert(Math.abs(dcIm) < 1e-2, `shape ${rows}x${cols} batch ${b} DC im=${dcIm}, expected 0`);
 			}
 			const output = addon.batchIfft2D(re, im, rows, cols, batchCount);
-			const err = maxError(input, output);
-			assert(err < 1e-3, `shape ${rows}x${cols} round-trip error ${err}`);
+			const error = maxError(input, output);
+			assert(error < 1e-3, `shape ${rows}x${cols} round-trip error ${error}`);
 		}
 	});
 } else {
