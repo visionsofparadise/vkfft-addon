@@ -1,4 +1,8 @@
 node_modules/
 build/
-package-lock.json
+artifacts/
 implibs/
+package-lock.json
+.tools/
+.eslintcache
+tsconfig.tsbuildinfo

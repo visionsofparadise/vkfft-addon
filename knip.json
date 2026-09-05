@@ -1,0 +1,12 @@
+{
+	"$schema": "https://unpkg.com/knip@6/schema.json",
+	"project": ["*.js", "*.mjs"],
+	"ignore": [],
+	"ignoreDependencies": [
+		"@commitlint/cli",
+		"node-addon-api",
+		"prettier",
+		"textlint-filter-rule-comments",
+		"textlint-rule-no-dead-link"
+	]
+}
