@@ -1,134 +1,140 @@
 name: Build
 
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+   push:
+      branches: [main]
+   workflow_dispatch:
 
 jobs:
-  detect-version:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.check.outputs.version }}
-      should-release: ${{ steps.check.outputs.should-release }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+   detect-version:
+      runs-on: ubuntu-latest
+      outputs:
+         version: ${{ steps.check.outputs.version }}
+         should-release: ${{ steps.check.outputs.should-release }}
+      steps:
+         - uses: actions/checkout@v4
+           with:
+              fetch-depth: 0
 
-      - id: check
-        shell: bash
-        run: |
-          current=$(node -p "require('./package.json').version")
-          echo "version=$current" >> "$GITHUB_OUTPUT"
-          if git rev-parse "v$current" >/dev/null 2>&1; then
-            echo "should-release=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "should-release=true" >> "$GITHUB_OUTPUT"
-          fi
+         - id: check
+           shell: bash
+           run: |
+              current=$(node -p "require('./package.json').version")
+              echo "version=$current" >> "$GITHUB_OUTPUT"
+              if git rev-parse "v$current" >/dev/null 2>&1; then
+                echo "should-release=false" >> "$GITHUB_OUTPUT"
+              else
+                echo "should-release=true" >> "$GITHUB_OUTPUT"
+              fi
 
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            platform: win32
-            arch: x64
-          - os: ubuntu-latest
-            platform: linux
-            arch: x64
-          - os: macos-latest
-            platform: darwin
-            arch: x64
-            cmake-extra: "--CDCMAKE_OSX_ARCHITECTURES=x86_64"
-          - os: macos-latest
-            platform: darwin
-            arch: arm64
+   build:
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - os: windows-latest
+                 platform: win32
+                 arch: x64
+               - os: ubuntu-latest
+                 platform: linux
+                 arch: x64
+               - os: macos-latest
+                 platform: darwin
+                 arch: x64
+                 cmake-extra: "--CDCMAKE_OSX_ARCHITECTURES=x86_64"
+               - os: macos-latest
+                 platform: darwin
+                 arch: arm64
 
-    runs-on: ${{ matrix.os }}
+      runs-on: ${{ matrix.os }}
 
-    steps:
-      - uses: actions/checkout@v4
+      steps:
+         - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
+         - uses: actions/setup-node@v4
+           with:
+              node-version: 22
 
-      - name: Install Vulkan SDK (Windows)
-        if: matrix.platform == 'win32'
-        shell: pwsh
-        run: |
-          $ver = "1.4.304.1"
-          $installer = "VulkanSDK-$ver-Installer.exe"
-          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$ver/windows/$installer" -OutFile $installer
-          Start-Process -FilePath ".\$installer" -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait
-          $sdkPath = "C:\VulkanSDK\$ver"
-          echo "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
-          echo "$sdkPath\Bin" >> $env:GITHUB_PATH
+         - name: Pin npm 12
+           run: npm install -g npm@12
 
-      - name: Install Vulkan SDK (Linux)
-        if: matrix.platform == 'linux'
-        run: |
-          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
-          echo "deb https://packages.lunarg.com/vulkan/1.4.304 noble main" | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list
-          sudo apt update
-          sudo apt install -y vulkan-sdk
+         - name: Enforce install-script allowlist
+           run: npm config set strict-allow-scripts=true --location=project
 
-      - name: Install Vulkan SDK (macOS)
-        if: matrix.platform == 'darwin'
-        run: |
-          brew install vulkan-headers vulkan-loader glslang spirv-tools molten-vk
+         - name: Install Vulkan SDK (Windows)
+           if: matrix.platform == 'win32'
+           shell: pwsh
+           run: |
+              $ver = "1.4.304.1"
+              $installer = "VulkanSDK-$ver-Installer.exe"
+              Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$ver/windows/$installer" -OutFile $installer
+              Start-Process -FilePath ".\$installer" -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait
+              $sdkPath = "C:\VulkanSDK\$ver"
+              echo "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
+              echo "$sdkPath\Bin" >> $env:GITHUB_PATH
 
-      - run: npm install
+         - name: Install Vulkan SDK (Linux)
+           if: matrix.platform == 'linux'
+           run: |
+              wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+              echo "deb https://packages.lunarg.com/vulkan/1.4.304 noble main" | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list
+              sudo apt update
+              sudo apt install -y vulkan-sdk
 
-      - name: Build addon
-        run: npx cmake-js compile --CDCMAKE_BUILD_TYPE=Release ${{ matrix.cmake-extra }}
+         - name: Install Vulkan SDK (macOS)
+           if: matrix.platform == 'darwin'
+           run: |
+              brew install vulkan-headers vulkan-loader glslang spirv-tools molten-vk
 
-      - name: Test addon
-        if: matrix.cmake-extra == ''
-        run: node test.js
+         - run: npm install
 
-      - name: Rename artifact
-        shell: bash
-        run: |
-          mkdir -p artifacts
-          cp build/Release/vkfft_addon.node artifacts/vkfft-${{ matrix.platform }}-${{ matrix.arch }}.node
+         - name: Build addon
+           run: npx cmake-js compile --CDCMAKE_BUILD_TYPE=Release ${{ matrix.cmake-extra }}
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: vkfft-${{ matrix.platform }}-${{ matrix.arch }}
-          path: artifacts/*.node
+         - name: Test addon
+           if: matrix.cmake-extra == ''
+           run: node test.js
 
-  release:
-    needs: [detect-version, build]
-    if: needs.detect-version.outputs.should-release == 'true' && success()
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+         - name: Rename artifact
+           shell: bash
+           run: |
+              mkdir -p artifacts
+              cp build/Release/vkfft_addon.node artifacts/vkfft-${{ matrix.platform }}-${{ matrix.arch }}.node
 
-    steps:
-      - uses: actions/checkout@v4
+         - uses: actions/upload-artifact@v4
+           with:
+              name: vkfft-${{ matrix.platform }}-${{ matrix.arch }}
+              path: artifacts/*.node
 
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
+   release:
+      needs: [detect-version, build]
+      if: needs.detect-version.outputs.should-release == 'true' && success()
+      runs-on: ubuntu-latest
+      permissions:
+         contents: write
 
-      - name: List artifacts
-        run: ls -la artifacts/
+      steps:
+         - uses: actions/checkout@v4
 
-      - name: Create and push tag
-        env:
-          VERSION: ${{ needs.detect-version.outputs.version }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
+         - uses: actions/download-artifact@v4
+           with:
+              path: artifacts
+              merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ needs.detect-version.outputs.version }}
-          files: artifacts/*.node
-          generate_release_notes: true
+         - name: List artifacts
+           run: ls -la artifacts/
+
+         - name: Create and push tag
+           env:
+              VERSION: ${{ needs.detect-version.outputs.version }}
+           run: |
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git tag "v$VERSION"
+              git push origin "v$VERSION"
+
+         - uses: softprops/action-gh-release@v2
+           with:
+              tag_name: v${{ needs.detect-version.outputs.version }}
+              files: artifacts/*.node
+              generate_release_notes: true
