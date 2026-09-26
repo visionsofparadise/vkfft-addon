@@ -103,6 +103,7 @@ jobs:
 
          - uses: actions/upload-artifact@v4
            with:
+              retention-days: 1
               name: vkfft-${{ matrix.platform }}-${{ matrix.arch }}
               path: artifacts/*.node
 
@@ -138,3 +139,24 @@ jobs:
               tag_name: v${{ needs.detect-version.outputs.version }}
               files: artifacts/*.node
               generate_release_notes: true
+
+         - name: Delete older stable releases
+           env:
+              GH_TOKEN: ${{ github.token }}
+           run: node scripts/releaseRetention.mjs releases v${{ needs.detect-version.outputs.version }}
+
+   cleanup-artifacts:
+      needs: [build, release]
+      if: ${{ always() && needs.build.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped') }}
+      runs-on: ubuntu-latest
+      permissions:
+         actions: write
+      steps:
+         - uses: actions/checkout@v4
+         - uses: actions/setup-node@v4
+           with:
+              node-version: 24
+         - name: Delete temporary workflow artifacts
+           env:
+              GH_TOKEN: ${{ github.token }}
+           run: node scripts/releaseRetention.mjs artifacts
