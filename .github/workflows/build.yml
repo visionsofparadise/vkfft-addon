@@ -1,12 +1,30 @@
 name: Build
 
-on:
-   push:
-      branches: [main]
-   workflow_dispatch:
+on: workflow_dispatch
 
 jobs:
+   gate:
+      if: github.ref == 'refs/heads/main'
+      runs-on: ubuntu-latest
+      steps:
+         - uses: actions/checkout@v4
+
+         - uses: actions/setup-node@v4
+           with:
+              node-version: 22
+
+         - name: Pin npm 12
+           run: npm install -g npm@12
+
+         - name: Enforce install-script allowlist
+           run: npm config set strict-allow-scripts=true --location=project
+
+         - run: npm install
+
+         - run: npm run check
+
    detect-version:
+      needs: gate
       runs-on: ubuntu-latest
       outputs:
          version: ${{ steps.check.outputs.version }}
@@ -28,6 +46,7 @@ jobs:
               fi
 
    build:
+      needs: gate
       strategy:
          fail-fast: false
          matrix:
