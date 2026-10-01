@@ -24,8 +24,8 @@ jobs:
                  echo "::error::$tag is already released; bump the version"
                  exit 1
               fi
-              if git rev-parse "$tag" >/dev/null 2>&1; then
-                 echo "::error::$tag is already tagged; bump the version"
+              if git rev-parse -q --verify "refs/tags/$tag" >/dev/null && [ "$(git rev-parse "$tag^{commit}")" != "$GITHUB_SHA" ]; then
+                 echo "::error::$tag already tags another commit; bump the version"
                  exit 1
               fi
 
@@ -48,22 +48,14 @@ jobs:
       runs-on: ubuntu-latest
       outputs:
          version: ${{ steps.check.outputs.version }}
-         should-release: ${{ steps.check.outputs.should-release }}
       steps:
          - uses: actions/checkout@v4
-           with:
-              fetch-depth: 0
 
          - id: check
            shell: bash
            run: |
               current=$(node -p "require('./package.json').version")
               echo "version=$current" >> "$GITHUB_OUTPUT"
-              if git rev-parse "v$current" >/dev/null 2>&1; then
-                echo "should-release=false" >> "$GITHUB_OUTPUT"
-              else
-                echo "should-release=true" >> "$GITHUB_OUTPUT"
-              fi
 
    build:
       needs: gate
@@ -148,7 +140,6 @@ jobs:
 
    release:
       needs: [detect-version, build]
-      if: needs.detect-version.outputs.should-release == 'true' && success()
       runs-on: ubuntu-latest
       permissions:
          contents: write
@@ -170,8 +161,10 @@ jobs:
            run: |
               git config user.name "github-actions[bot]"
               git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-              git tag "v$VERSION"
-              git push origin "v$VERSION"
+              if [ "$(git ls-remote --tags origin "refs/tags/v$VERSION")" = "" ]; then
+                 git tag "v$VERSION"
+                 git push origin "v$VERSION"
+              fi
 
          - uses: softprops/action-gh-release@v2
            with:
